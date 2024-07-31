@@ -1,9 +1,10 @@
-import bpy
-import typing
+import importlib
 import inspect
 import pkgutil
-import importlib
+import typing
 from pathlib import Path
+
+import bpy
 
 __all__ = (
     "init",
@@ -175,14 +176,14 @@ def toposort(deps_dict):
         unsorted = []
         # JoseConseco forgot this code
         # https://devtalk.blender.org/t/batch-registering-multiple-classes-in-blender-2-8/3253/42
-        sorted_list_sub = []      # helper for additional sorting by bl_order - in panels
+        sorted_list_sub = []  # helper for additional sorting by bl_order - in panels
         for value, deps in deps_dict.items():
             if len(deps) == 0:
                 sorted_list_sub.append(value)
                 sorted_values.add(value)
             else:
                 unsorted.append(value)
-        deps_dict = {value : deps_dict[value] - sorted_values for value in unsorted}
-        sorted_list_sub.sort(key=lambda cls: getattr(cls, 'bl_order',0))
+        deps_dict = {value: deps_dict[value] - sorted_values for value in unsorted}
+        sorted_list_sub.sort(key=lambda cls: getattr(cls, "bl_order", 0))
         sorted_list.extend(sorted_list_sub)
     return sorted_list
