@@ -1,8 +1,9 @@
+import atexit
 import os
 import sys
 import traceback
 from pathlib import Path
-from typing import List, Union, Optional, Dict
+from typing import List, Tuple, Union, Optional, Dict
 
 import bpy
 
@@ -11,8 +12,19 @@ from .communication import send_dict_as_json
 from .environment import addon_directories
 from .utils import is_addon_legacy, addon_has_bl_info
 
+KEEP_ADDON_INSTALLED = False
 
-def setup_addon_links(addons_to_load: List[AddonInfo]) -> List[Dict]:
+
+def register_post_action_change_keep_addon_installed(data: Dict):
+    global KEEP_ADDON_INSTALLED
+    KEEP_ADDON_INSTALLED = bool(data["value"])
+
+
+def _fake_poll(*args, **kwargs):
+    return False
+
+
+def setup_addon_links(addons_to_load: List[AddonInfo]) -> Tuple[List[Dict], List[Dict]]:
     path_mappings: List[Dict] = []
 
     addons_default_dir = bpy.utils.user_resource("SCRIPTS", path="addons")
@@ -22,31 +34,40 @@ def setup_addon_links(addons_to_load: List[AddonInfo]) -> List[Dict]:
     if str(addons_default_dir) not in sys.path:
         sys.path.append(str(addons_default_dir))
 
+    load_status: List[Dict] = []
+    # disable bpy.ops.preferences.copy_prev() is not happy with links that are about to be crated
+    bpy.types.PREFERENCES_OT_copy_prev.poll = _fake_poll
     for addon_info in addons_to_load:
-        if is_addon_legacy(addon_info.load_dir):
-            if is_in_any_addon_directory(addon_info.load_dir):
-                # blender knows about addon and can load it
-                load_path = addon_info.load_dir
-            else:  # addon is in external dir or is in extensions dir
-                load_path = os.path.join(addons_default_dir, addon_info.module_name)
-                create_link_in_user_addon_directory(addon_info.load_dir, load_path)
-        else:
-            if addon_has_bl_info(addon_info.load_dir) and is_in_any_addon_directory(addon_info.load_dir):
-                # this addon is compatible with legacy addons and extensions
-                # but user is developing it in addon directory. Treat it as addon.
-                load_path = addon_info.load_dir
-            elif is_in_any_extension_directory(addon_info.load_dir):
-                # blender knows about extension and can load it
-                load_path = addon_info.load_dir
+        try:
+            if is_addon_legacy(addon_info.load_dir):
+                if is_in_any_addon_directory(addon_info.load_dir):
+                    # blender knows about addon and can load it
+                    load_path = addon_info.load_dir
+                else:  # addon is in external dir or is in extensions dir
+                    load_path = os.path.join(addons_default_dir, addon_info.module_name)
+                    make_temporary_link(addon_info.load_dir, load_path)
             else:
-                # blender does not know about extension, and it must be linked to default location
-                extensions_default_dir = Path(bpy.utils.user_resource("EXTENSIONS", path="user_default"))
-                os.makedirs(extensions_default_dir, exist_ok=True)
-                load_path = os.path.join(extensions_default_dir, addon_info.module_name)
-                create_link_in_user_addon_directory(addon_info.load_dir, load_path)
-        path_mappings.append({"src": str(addon_info.load_dir), "load": str(load_path)})
+                if addon_has_bl_info(addon_info.load_dir) and is_in_any_addon_directory(addon_info.load_dir):
+                    # this addon is compatible with legacy addons and extensions
+                    # but user is developing it in addon directory. Treat it as addon.
+                    load_path = addon_info.load_dir
+                elif is_in_any_extension_directory(addon_info.load_dir):
+                    # blender knows about extension and can load it
+                    load_path = addon_info.load_dir
+                else:
+                    # blender does not know about extension, and it must be linked to default location
+                    extensions_default_dir = Path(bpy.utils.user_resource("EXTENSIONS", path="user_default"))
+                    os.makedirs(extensions_default_dir, exist_ok=True)
+                    load_path = os.path.join(extensions_default_dir, addon_info.module_name)
+                    make_temporary_link(addon_info.load_dir, load_path)
+            path_mappings.append({"src": str(addon_info.load_dir), "load": str(load_path)})
+        except Exception:
+            traceback.print_exc()
+            load_status.append({"type": "enableFailure", "addonPath": str(addon_info.load_dir)})
+        else:
+            path_mappings.append({"src": str(addon_info.load_dir), "load": str(load_path)})
 
-    return path_mappings
+    return path_mappings, load_status
 
 
 def load(addons_to_load: List[AddonInfo]):
@@ -71,9 +92,15 @@ def load(addons_to_load: List[AddonInfo]):
             send_dict_as_json({"type": "enableFailure", "addonPath": str(addon_info.load_dir)})
 
 
-def create_link_in_user_addon_directory(directory: Union[str, os.PathLike], link_path: Union[str, os.PathLike]):
+def make_temporary_link(directory: Union[str, os.PathLike], link_path: Union[str, os.PathLike]):
     if os.path.exists(link_path):
-        os.remove(link_path)
+        try:
+            os.remove(link_path)
+        except PermissionError as ex:
+            print(
+                f'ERROR: Could not remove path "{link_path}" due to insufficient permission. Please remove it manually.'
+            )
+            raise ex
 
     if sys.platform == "win32":
         import _winapi
@@ -81,6 +108,21 @@ def create_link_in_user_addon_directory(directory: Union[str, os.PathLike], link
         _winapi.CreateJunction(str(directory), str(link_path))
     else:
         os.symlink(str(directory), str(link_path), target_is_directory=True)
+
+    def cleanup():
+        if KEEP_ADDON_INSTALLED:
+            return
+        if not os.path.exists(link_path):
+            return
+        try:
+            os.remove(link_path)
+        except PermissionError as ex:
+            print(
+                f'ERROR: Could not remove path "{link_path}" due to insufficient permission. Please remove it manually.'
+            )
+            raise ex
+
+    atexit.register(cleanup)
 
 
 def is_in_any_addon_directory(module_path: Path) -> bool:
